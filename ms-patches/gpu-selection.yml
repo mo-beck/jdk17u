@@ -1,0 +1,9 @@
+title: GPU Selection Hints for High-Performance Mode
+- work_item: '1949141'
+- author: mo-beck
+- owner: mo-beck
+- contributors: []
+- details:
+  - Adds trace-level logging to indicate GPU hint variables are exported.
+  - Uses __declspec(dllexport) to enable high-performance GPU selection on Windows.
+- release_note: 'Trace-level export of NvOptimusEnablement and AmdPowerXpressRequestHighPerformance hints for Windows GPU detection.'
