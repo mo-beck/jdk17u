@@ -103,6 +103,19 @@
 #include <mmsystem.h>
 #include <winsock2.h>
 
+// Export symbols for high-performance GPU selection
+extern "C" {
+  __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+  __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+
+// JVM GPU logging at trace level
+static struct GPUExportLogger {
+  GPUExportLogger() {
+    log_trace(os)("JVM GPU Selection: Exporting NvOptimusEnablement and AmdPowerXpressRequestHighPerformance hints for driver.");
+  }
+} gpu_export_logger;
+
 // for timer info max values which include all bits
 #define ALL_64_BITS CONST64(-1)
 
