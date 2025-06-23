@@ -32,6 +32,7 @@
 
 class G1EvacuationInfo;
 class G1NUMA;
+class G1HeapSizingPolicy;
 
 // Interface to keep track of which regions G1 is currently allocating into. Provides
 // some accessors (e.g. allocating into them, or getting their occupancy).
@@ -45,6 +46,13 @@ private:
 
   bool _survivor_is_full;
   bool _old_is_full;
+
+  // Helper method to record region activity
+  void record_region_activity(HeapRegion* hr) {
+    if (hr != nullptr) {
+      hr->record_activity();
+    }
+  }
 
   // The number of MutatorAllocRegions used, one per memory node.
   size_t _num_alloc_regions;

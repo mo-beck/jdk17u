@@ -39,6 +39,7 @@
 #include "gc/g1/g1ConcurrentRefineThread.hpp"
 #include "gc/g1/g1ConcurrentMarkThread.inline.hpp"
 #include "gc/g1/g1DirtyCardQueue.hpp"
+#include "gc/g1/g1HeapEvaluationTask.hpp"
 #include "gc/g1/g1EvacStats.inline.hpp"
 #include "gc/g1/g1FullCollector.hpp"
 #include "gc/g1/g1GCParPhaseTimesTracker.hpp"
@@ -105,6 +106,7 @@
 #include "runtime/java.hpp"
 #include "runtime/orderAccess.hpp"
 #include "runtime/threadSMR.hpp"
+#include "runtime/vmOperations.hpp"
 #include "runtime/vmThread.hpp"
 #include "utilities/align.hpp"
 #include "utilities/autoRestore.hpp"
@@ -1364,6 +1366,24 @@ void G1CollectedHeap::shrink(size_t shrink_bytes) {
   _verifier->verify_region_sets_optional();
 }
 
+bool G1CollectedHeap::request_heap_shrink(size_t shrink_bytes) {
+  if (shrink_bytes == 0) {
+    return false;
+  }
+
+  // Fast path: if we are already at a safepoint (e.g. called from the
+  // GC service thread) just do the work directly.
+  if (SafepointSynchronize::is_at_safepoint()) {
+    shrink(shrink_bytes);
+    return true;                     // we *did* something
+  }
+
+  // Schedule a small VM-op so the work is done at the next safepoint
+  VM_G1ShrinkHeap op(this, shrink_bytes);
+  VMThread::execute(&op);
+  return true;                       // pages were at least *requested* to be released
+}
+
 class OldRegionSetChecker : public HeapRegionSetChecker {
 public:
   void check_mt_safety() {
@@ -1430,6 +1450,7 @@ G1CollectedHeap::G1CollectedHeap() :
   CollectedHeap(),
   _service_thread(NULL),
   _periodic_gc_task(NULL),
+  _heap_evaluation_task(NULL),
   _workers(NULL),
   _card_table(NULL),
   _collection_pause_end(Ticks::now()),
@@ -1734,6 +1755,12 @@ jint G1CollectedHeap::initialize() {
   // Create and schedule the periodic gc task on the service thread.
   _periodic_gc_task = new G1PeriodicGCTask("Periodic GC Task");
   _service_thread->register_task(_periodic_gc_task);
+
+  // Create and schedule the heap evaluation task on the service thread.
+  if (G1UseTimeBasedHeapSizing) {
+    _heap_evaluation_task = new G1HeapEvaluationTask(this, heap_sizing_policy());
+    _service_thread->register_task(_heap_evaluation_task);
+  }
 
   {
     G1DirtyCardQueueSet& dcqs = G1BarrierSet::dirty_card_queue_set();
@@ -2621,6 +2648,17 @@ void G1CollectedHeap::uncommit_regions_if_necessary() {
   if (has_uncommittable_regions()) {
     G1UncommitRegionTask::enqueue();
   }
+}
+
+bool G1CollectedHeap::check_region_for_uncommit(HeapRegion* hr) {
+  if (!hr->is_empty()) {
+    log_trace(gc, heap)("Region %u not eligible for uncommit - not empty", hr->hrm_index());
+    return false;
+  }
+  bool should_uncommit = hr->should_uncommit(G1HeapSizingPolicy::uncommit_delay());
+  log_trace(gc, heap)("Region %u uncommit check: empty=%d should_uncommit=%d", 
+                      hr->hrm_index(), hr->is_empty(), should_uncommit);
+  return should_uncommit;
 }
 
 void G1CollectedHeap::verify_numa_regions(const char* desc) {
@@ -4129,6 +4167,8 @@ void G1CollectedHeap::retire_mutator_alloc_region(HeapRegion* alloc_region,
   assert_heap_locked_or_at_safepoint(true /* should_be_vm_thread */);
   assert(alloc_region->is_eden(), "all mutator alloc regions should be eden");
 
+  alloc_region->record_activity(); // Update region access time for time-based heap sizing
+
   collection_set()->add_eden_region(alloc_region);
   increase_used(allocated_bytes);
   _eden.add_used_bytes(allocated_bytes);
@@ -4189,6 +4229,8 @@ HeapRegion* G1CollectedHeap::new_gc_alloc_region(size_t word_size, G1HeapRegionA
 void G1CollectedHeap::retire_gc_alloc_region(HeapRegion* alloc_region,
                                              size_t allocated_bytes,
                                              G1HeapRegionAttr dest) {
+  alloc_region->record_activity(); // Update region access time for time-based heap sizing
+  
   _bytes_used_during_gc += allocated_bytes;
   if (dest.is_old()) {
     old_set_add(alloc_region);
