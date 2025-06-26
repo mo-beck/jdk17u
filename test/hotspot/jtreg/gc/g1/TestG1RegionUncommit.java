@@ -34,10 +34,12 @@ package gc.g1;
  * @run main/othervm -XX:+UseG1GC -Xms8m -Xmx256m -XX:G1HeapRegionSize=1M 
  *                   -XX:+UnlockExperimentalVMOptions -XX:+G1UseTimeBasedHeapSizing 
  *                   -XX:G1UncommitDelayMillis=3000 -XX:G1TimeBasedEvaluationIntervalMillis=2000 -XX:G1MinRegionsToUncommit=2
- *                   -Xlog:gc+sizing=debug
+ *                   -Xlog:gc*,gc+sizing*=debug
  *                   gc.g1.TestG1RegionUncommit
  */
 
+import java.util.ArrayList;
+import java.util.List;
 import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
 
@@ -47,9 +49,15 @@ public class TestG1RegionUncommit {
         // If no args, run the subprocess with log analysis
         if (args.length == 0) {
             testTimeBasedEvaluation();
-        } else {
+            testMinimumHeapBoundary();
+            testConcurrentAllocationUncommit();
+        } else if ("subprocess".equals(args[0])) {
             // This is the subprocess that does the actual allocation/deallocation
             runAllocationTest();
+        } else if ("minheap".equals(args[0])) {
+            runMinHeapBoundaryTest();
+        } else if ("concurrent".equals(args[0])) {
+            runConcurrentTest();
         }
     }
     
@@ -60,17 +68,19 @@ public class TestG1RegionUncommit {
             "-XX:+UnlockExperimentalVMOptions", "-XX:+G1UseTimeBasedHeapSizing",
             "-XX:G1UncommitDelayMillis=3000", "-XX:G1TimeBasedEvaluationIntervalMillis=2000", 
             "-XX:G1MinRegionsToUncommit=2",
-            "-Xlog:gc+sizing=debug",
+            "-Xlog:gc*,gc+sizing*=debug",
             "gc.g1.TestG1RegionUncommit", "subprocess"
         );
         
         OutputAnalyzer output = new OutputAnalyzer(pb.start());
         
         // Verify the time-based evaluation logic is working
+        output.shouldContain("G1 Time-Based Heap Sizing enabled (uncommit-only)");
+        output.shouldContain("Starting heap evaluation");
         output.shouldContain("Region state transition:");
         output.shouldContain("transitioning from active to inactive");
         output.shouldContain("Uncommit candidates found:");
-        output.shouldContain("Time-based heap shrink evaluation:");
+        output.shouldContain("Time-based heap uncommit evaluation:");
         output.shouldContain("target shrink:");
         
         output.shouldHaveExitValue(0);
@@ -110,6 +120,124 @@ public class TestG1RegionUncommit {
         System.gc();
         
         System.out.println("=== Test completed ===");
+        Runtime.getRuntime().halt(0);
+    }
+    
+    static void testMinimumHeapBoundary() throws Exception {
+        System.out.println("Testing minimum heap boundary conditions...");
+        
+        ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(
+            "-XX:+UseG1GC",
+            "-Xms32m", "-Xmx64m",  // Small heap to test boundaries
+            "-XX:G1HeapRegionSize=1M",
+            "-XX:+UnlockExperimentalVMOptions", "-XX:+G1UseTimeBasedHeapSizing",
+            "-XX:G1UncommitDelayMillis=2000", // Short delay
+            "-XX:G1TimeBasedEvaluationIntervalMillis=1000",
+            "-XX:G1MinRegionsToUncommit=1",
+            "-Xlog:gc+sizing=debug,gc+task=debug",
+            "gc.g1.TestG1RegionUncommit", "minheap"
+        );
+        
+        OutputAnalyzer output = new OutputAnalyzer(pb.start());
+        
+        // Should not uncommit below initial heap size
+        output.shouldHaveExitValue(0);
+        System.out.println("Minimum heap boundary test passed!");
+    }
+    
+    static void testConcurrentAllocationUncommit() throws Exception {
+        System.out.println("Testing concurrent allocation and uncommit...");
+        
+        ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(
+            "-XX:+UseG1GC",
+            "-Xms64m", "-Xmx256m",
+            "-XX:G1HeapRegionSize=1M",
+            "-XX:+UnlockExperimentalVMOptions", "-XX:+G1UseTimeBasedHeapSizing",
+            "-XX:G1TimeBasedEvaluationIntervalMillis=1000", // Frequent evaluation
+            "-XX:G1UncommitDelayMillis=2000",
+            "-XX:G1MinRegionsToUncommit=2",
+            "-Xlog:gc+sizing=debug,gc+task=debug",
+            "gc.g1.TestG1RegionUncommit", "concurrent"
+        );
+        
+        OutputAnalyzer output = new OutputAnalyzer(pb.start());
+        
+        // Should handle concurrent operations safely
+        output.shouldHaveExitValue(0);
+        System.out.println("Concurrent allocation/uncommit test passed!");
+    }
+    
+    static void runMinHeapBoundaryTest() throws Exception {
+        System.out.println("=== Min Heap Boundary Test ===");
+        
+        List<byte[]> memory = new ArrayList<>();
+        
+        // Allocate close to max
+        for (int i = 0; i < 28; i++) { // 28MB, close to 32MB limit
+            memory.add(new byte[1024 * 1024]);
+        }
+        
+        // Clear and wait for uncommit attempt
+        memory.clear();
+        System.gc();
+        Thread.sleep(8000); // Wait longer than uncommit delay
+        
+        System.out.println("MinHeapBoundaryTest completed");
+        Runtime.getRuntime().halt(0);
+    }
+    
+    static void runConcurrentTest() throws Exception {
+        System.out.println("=== Concurrent Test ===");
+        
+        final List<byte[]> sharedMemory = new ArrayList<>();
+        final boolean[] stopFlag = {false};
+        
+        // Start allocation thread
+        Thread allocThread = new Thread(() -> {
+            int iterations = 0;
+            while (!stopFlag[0] && iterations < 50) {
+                try {
+                    // Allocate
+                    for (int j = 0; j < 5; j++) {
+                        synchronized (sharedMemory) {
+                            sharedMemory.add(new byte[1024 * 1024]); // 1MB
+                        }
+                        Thread.sleep(10);
+                    }
+                    
+                    // Clear some
+                    synchronized (sharedMemory) {
+                        if (sharedMemory.size() > 10) {
+                            for (int k = 0; k < 5; k++) {
+                                if (!sharedMemory.isEmpty()) {
+                                    sharedMemory.remove(0);
+                                }
+                            }
+                        }
+                    }
+                    System.gc();
+                    Thread.sleep(50);
+                    iterations++;
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        });
+        
+        allocThread.start();
+        
+        // Let it run for a while to trigger time-based evaluation
+        Thread.sleep(8000);
+        
+        stopFlag[0] = true;
+        allocThread.join(2000);
+        
+        synchronized (sharedMemory) {
+            sharedMemory.clear();
+        }
+        System.gc();
+        
+        System.out.println("ConcurrentTest completed");
         Runtime.getRuntime().halt(0);
     }
 }

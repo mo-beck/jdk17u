@@ -1340,7 +1340,12 @@ void G1CollectedHeap::shrink_helper(size_t shrink_bytes) {
   log_debug(gc, ergo, heap)("Shrink the heap. requested shrinking amount: " SIZE_FORMAT "B aligned shrinking amount: " SIZE_FORMAT "B attempted shrinking amount: " SIZE_FORMAT "B",
                             shrink_bytes, aligned_shrink_bytes, shrunk_bytes);
   if (num_regions_removed > 0) {
-    log_debug(gc, heap)("Uncommittable regions after shrink: %u", num_regions_removed);
+    log_info(gc, heap)("Heap shrink completed: uncommitted %u regions (%zuMB), heap size now %zuMB",
+                       num_regions_removed, shrunk_bytes / M, capacity() / M);
+    log_debug(gc, heap)("Heap shrink details: requested=%zuB aligned=%zuB attempted=%zuB actual=%zuB "
+                        "regions_removed=%u heap_capacity=%zuB",
+                        shrink_bytes, aligned_shrink_bytes, num_regions_to_remove * HeapRegion::GrainBytes,
+                        shrunk_bytes, num_regions_removed, capacity());
     policy()->record_new_heap_size(num_regions());
   } else {
     log_debug(gc, ergo, heap)("Did not expand the heap (heap shrinking operation failed)");
@@ -1513,6 +1518,7 @@ G1CollectedHeap::G1CollectedHeap() :
   _allocator = new G1Allocator(this);
 
   _heap_sizing_policy = G1HeapSizingPolicy::create(this, _policy->analytics());
+  _heap_sizing_policy->initialize();
 
   _humongous_object_threshold_in_words = humongous_threshold_for(HeapRegion::GrainWords);
 
@@ -1760,6 +1766,7 @@ jint G1CollectedHeap::initialize() {
   if (G1UseTimeBasedHeapSizing) {
     _heap_evaluation_task = new G1HeapEvaluationTask(this, heap_sizing_policy());
     _service_thread->register_task(_heap_evaluation_task);
+    log_debug(gc, init)("G1 Time-Based Heap Evaluation task registered and scheduled");
   }
 
   {
@@ -2648,17 +2655,6 @@ void G1CollectedHeap::uncommit_regions_if_necessary() {
   if (has_uncommittable_regions()) {
     G1UncommitRegionTask::enqueue();
   }
-}
-
-bool G1CollectedHeap::check_region_for_uncommit(HeapRegion* hr) {
-  if (!hr->is_empty()) {
-    log_trace(gc, heap)("Region %u not eligible for uncommit - not empty", hr->hrm_index());
-    return false;
-  }
-  bool should_uncommit = hr->should_uncommit(G1HeapSizingPolicy::uncommit_delay());
-  log_trace(gc, heap)("Region %u uncommit check: empty=%d should_uncommit=%d", 
-                      hr->hrm_index(), hr->is_empty(), should_uncommit);
-  return should_uncommit;
 }
 
 void G1CollectedHeap::verify_numa_regions(const char* desc) {

@@ -587,9 +587,6 @@ public:
   uint uncommit_regions(uint region_limit);
   bool has_uncommittable_regions();
 
-  // Check if a region can be uncommitted based on emptiness and usage threshold
-  bool check_region_for_uncommit(HeapRegion* hr);
-
   G1NUMA* numa() const { return _numa; }
 
   // Expand the garbage-first heap by at least the given size (in bytes!).

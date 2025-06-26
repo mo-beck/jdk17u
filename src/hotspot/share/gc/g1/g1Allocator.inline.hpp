@@ -76,14 +76,6 @@ inline HeapWord* G1Allocator::attempt_allocation_locked(size_t word_size) {
   uint node_index = current_node_index();
   HeapWord* result = mutator_alloc_region(node_index)->attempt_allocation_locked(word_size);
 
-  // Record activity on successful locked allocation
-  if (result != NULL) {
-    HeapRegion* hr = _g1h->heap_region_containing(result);
-    if (hr != NULL) {
-      hr->record_activity();
-    }
-  }
-
   assert(result != NULL || mutator_alloc_region(node_index)->get() == NULL,
          "Must not have a mutator alloc region if there is no memory, but is " PTR_FORMAT, p2i(mutator_alloc_region(node_index)->get()));
   return result;

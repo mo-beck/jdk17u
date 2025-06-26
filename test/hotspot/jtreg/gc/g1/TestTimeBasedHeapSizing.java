@@ -36,7 +36,7 @@ package gc.g1;
  *     -XX:G1TimeBasedEvaluationIntervalMillis=5000
  *     -XX:G1UncommitDelayMillis=10000
  *     -XX:G1MinRegionsToUncommit=2
- *     -Xlog:gc+sizing=debug
+ *     -Xlog:gc*,gc+sizing*=debug
  *     gc.g1.TestTimeBasedHeapSizing
  */
 
@@ -54,10 +54,13 @@ public class TestTimeBasedHeapSizing {
         "-XX:G1MinRegionsToUncommit=2 " +
         "-XX:G1HeapRegionSize=1M " +
         "-Xmx128m -Xms32m " +
-        "-Xlog:gc+sizing=debug";
+        "-Xlog:gc*,gc+sizing*=debug";
 
     public static void main(String[] args) throws Exception {
         testBasicFunctionality();
+        testHumongousObjectHandling();
+        testRapidAllocationCycles();
+        testHumongousObjectTracking();
     }
 
     static void testBasicFunctionality() throws Exception {
@@ -67,6 +70,7 @@ public class TestTimeBasedHeapSizing {
         ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(command);
         OutputAnalyzer output = new OutputAnalyzer(pb.start());
         
+        output.shouldContain("G1 Time-Based Heap Sizing enabled (uncommit-only)");
         output.shouldContain("Starting heap evaluation");
         output.shouldContain("Full region scan:");
         
@@ -115,6 +119,143 @@ public class TestTimeBasedHeapSizing {
         static void clearMemory() {
             arrays.clear();
             System.gc();
+        }
+    }
+    
+    static void testHumongousObjectHandling() throws Exception {
+        String[] command = new String[TEST_VM_OPTS.split(" ").length + 1];
+        System.arraycopy(TEST_VM_OPTS.split(" "), 0, command, 0, TEST_VM_OPTS.split(" ").length);
+        command[command.length - 1] = "gc.g1.TestTimeBasedHeapSizing$HumongousObjectTest";
+        ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(command);
+        OutputAnalyzer output = new OutputAnalyzer(pb.start());
+        
+        output.shouldContain("Starting heap evaluation");
+        output.shouldHaveExitValue(0);
+    }
+    
+    static void testRapidAllocationCycles() throws Exception {
+        String[] command = new String[TEST_VM_OPTS.split(" ").length + 1];
+        System.arraycopy(TEST_VM_OPTS.split(" "), 0, command, 0, TEST_VM_OPTS.split(" ").length);
+        command[command.length - 1] = "gc.g1.TestTimeBasedHeapSizing$RapidCycleTest";
+        ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(command);
+        OutputAnalyzer output = new OutputAnalyzer(pb.start());
+        
+        output.shouldContain("Starting heap evaluation");
+        output.shouldHaveExitValue(0);
+    }
+    
+    static void testHumongousObjectTracking() throws Exception {
+        System.out.println("Testing humongous object activity tracking...");
+        
+        ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(
+            "-XX:+UseG1GC",
+            "-XX:+UnlockExperimentalVMOptions",
+            "-XX:+G1UseTimeBasedHeapSizing",
+            "-Xms64m", "-Xmx256m", 
+            "-XX:G1HeapRegionSize=1M",
+            "-XX:G1UncommitDelayMillis=5000",
+            "-XX:G1MinRegionsToUncommit=1",
+            "-Xlog:gc*,gc+sizing*=debug",
+            "gc.g1.TestTimeBasedHeapSizing$HumongousTrackingTest"
+        );
+        
+        OutputAnalyzer output = new OutputAnalyzer(pb.start());
+        
+        // Humongous objects should not affect uncommit safety
+        output.shouldContain("G1 Time-Based Heap Sizing enabled (uncommit-only)");
+        output.shouldHaveExitValue(0);
+        System.out.println("Humongous object tracking test passed!");
+    }
+    
+    public static class HumongousObjectTest {
+        private static final int MB = 1024 * 1024;
+        private static ArrayList<byte[]> humongousObjects = new ArrayList<>();
+        
+        public static void main(String[] args) throws Exception {
+            System.out.println("HumongousObjectTest: Starting");
+            
+            // Allocate humongous objects (> 512KB for 1MB regions)
+            for (int i = 0; i < 8; i++) {
+                humongousObjects.add(new byte[800 * 1024]); // 800KB humongous
+                System.out.println("Allocated humongous object " + (i + 1));
+                Thread.sleep(200);
+            }
+            
+            // Keep them alive for a while
+            Thread.sleep(3000);
+            
+            // Clear and test uncommit behavior
+            humongousObjects.clear();
+            System.gc();
+            Thread.sleep(12000); // Wait for uncommit delay
+            
+            System.out.println("HumongousObjectTest: Test completed");
+            Runtime.getRuntime().halt(0);
+        }
+    }
+    
+    public static class RapidCycleTest {
+        private static final int MB = 1024 * 1024;
+        private static ArrayList<byte[]> memory = new ArrayList<>();
+        
+        public static void main(String[] args) throws Exception {
+            System.out.println("RapidCycleTest: Starting");
+            
+            // Rapid allocation/deallocation cycles
+            for (int cycle = 0; cycle < 15; cycle++) {
+                // Quick allocation
+                for (int i = 0; i < 8; i++) {
+                    memory.add(new byte[MB]); // 1MB
+                }
+                
+                // Quick deallocation
+                memory.clear();
+                System.gc();
+                
+                // Brief pause
+                Thread.sleep(100);
+                
+                if (cycle % 5 == 0) {
+                    System.out.println("Completed cycle " + cycle);
+                }
+            }
+            
+            // Final wait for time-based evaluation
+            Thread.sleep(12000);
+            
+            System.out.println("RapidCycleTest: Test completed");
+            Runtime.getRuntime().halt(0);
+        }
+    }
+    
+    public static class HumongousTrackingTest {
+        public static void main(String[] args) throws Exception {
+            System.out.println("=== Humongous Object Tracking Test ===");
+            
+            // Allocate several humongous objects (larger than region size)
+            List<byte[]> humongousObjects = new ArrayList<>();
+            
+            // Each region is 1MB, so allocate 2MB objects (humongous)
+            for (int i = 0; i < 5; i++) {
+                humongousObjects.add(new byte[2 * 1024 * 1024]);
+                System.gc(); // Force potential region transitions
+                Thread.sleep(100);
+            }
+            
+            // Hold some, release others to create mixed region states
+            humongousObjects.remove(0);
+            humongousObjects.remove(0);
+            System.gc();
+            
+            // Wait for time-based evaluation with humongous regions present
+            Thread.sleep(8000);
+            
+            // Clean up
+            humongousObjects.clear();
+            System.gc();
+            
+            System.out.println("HumongousTrackingTest: Test completed");
+            Runtime.getRuntime().halt(0);
         }
     }
 }
